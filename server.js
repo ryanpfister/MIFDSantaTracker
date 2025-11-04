@@ -38,27 +38,50 @@ app.get("/api/health", (req, res) => res.json({ ok: true }));
 app.get("/api/location", (req, res) => res.json(lastLocation || {}));
 
 // Protected: phone posts GPS updates using password token
+// Protected: phone posts GPS updates using password token
 app.post("/api/update-location", (req, res) => {
   try {
-    const { lat, lng, accuracy, ts, token } = req.body || {};
-    const pass = "MIFD5150";
+    // Accept token from body.token / body.password / body.pass / header / query
+    const body = req.body || {};
+    const tokenIncoming =
+      (typeof body.token === "string" ? body.token :
+      typeof body.password === "string" ? body.password :
+      typeof body.pass === "string" ? body.pass :
+      req.get("x-santa-token") || req.query.token || "");
+
+    const provided = String(tokenIncoming || "").trim();
+    const pass = String(process.env.SANTA_PASSWORD || "MIFD5150").trim();
+
+    // DEBUG (temporarily): log what we got to confirm
+    console.log("UPDATE /api/update-location",
+      "ct=", req.headers["content-type"],
+      "providedLen=", provided.length,
+      "match=", provided === pass
+    );
+
     if (!pass) return res.status(500).json({ error: "Server missing SANTA_PASSWORD" });
-    if (!token || token !== pass) return res.status(401).json({ error: "Unauthorized" });
+    if (!provided || provided !== pass) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { lat, lng, accuracy, ts } = body;
     if (typeof lat !== "number" || typeof lng !== "number") {
       return res.status(400).json({ error: "lat and lng required" });
     }
+
     const now = Date.now();
     lastLocation = {
-      lat, lng,
+      lat,
+      lng,
       accuracy: (typeof accuracy === "number" ? accuracy : null),
       ts: (typeof ts === "number" ? ts : now),
       serverTs: now
     };
     broadcastLocation();
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Server error" });
+    console.error("update-location error:", e);
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
