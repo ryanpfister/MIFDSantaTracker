@@ -166,34 +166,6 @@ fetch('/api/route', { cache: 'no-store' })
   .catch(err => console.error('snapped route error:', err));
 
 // ----- Waypoint labels (smaller text, lower pane than Santa) -----
-fetch('/waypoints.json', { cache: 'no-store' })
-  .then(r => r.ok ? r.json() : [])
-  .then((wps = []) => {
-    waypointsDotsLayer.clearLayers();
-
-    wps.forEach(w => {
-      if (typeof w.lat === 'number' && typeof w.lng === 'number') {
-        const dot = L.circleMarker([w.lat, w.lng], {
-          pane: 'waypointsPane',
-          radius: 4,
-          weight: 2,
-          color: '#111827',
-          fillOpacity: 0.7
-        }).addTo(waypointsDotsLayer);
-
-        const labelHtml = `<span style="font-size:9px">${w.name || 'Waypoint'}</span>`;
-        dot.bindTooltip(labelHtml, {
-          pane: 'labelsPane',
-          permanent: true,
-          direction: 'top',
-          offset: [0, -6],
-          opacity: 0.95
-        });
-      }
-    });
-  })
-  .catch(() => { /* optional file; ignore errors */ });
-
 // ----- Live via socket.io + reset + polling fallbacks -----
 const socket = io();
 
