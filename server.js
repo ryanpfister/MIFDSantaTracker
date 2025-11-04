@@ -36,13 +36,20 @@ app.get("/api/health", (req, res) => res.json({ ok: true }));
 
 // Public: get current location (polling fallback)
 app.get("/api/location", (req, res) => res.json(lastLocation || {}));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
+// Protected: phone posts GPS updates using password token
 // Protected: phone posts GPS updates using password token
 // Protected: phone posts GPS updates using password token
 app.post("/api/update-location", (req, res) => {
   try {
-    // Accept token from body.token / body.password / body.pass / header / query
+    // Make sure this middleware is ABOVE this route:
+    // app.use(express.json());
+    // app.use(express.urlencoded({ extended: true }));
+
     const body = req.body || {};
+    // Accept token from multiple places (body, header, query)
     const tokenIncoming =
       (typeof body.token === "string" ? body.token :
       typeof body.password === "string" ? body.password :
@@ -50,19 +57,20 @@ app.post("/api/update-location", (req, res) => {
       req.get("x-santa-token") || req.query.token || "");
 
     const provided = String(tokenIncoming || "").trim();
+
+    // Use hardcoded fallback or env, whichever you prefer
     const pass = String(process.env.SANTA_PASSWORD || "MIFD5150").trim();
 
-    // DEBUG (temporarily): log what we got to confirm
+    // DEBUG: see exactly what Express received
     console.log("UPDATE /api/update-location",
       "ct=", req.headers["content-type"],
+      "len=", (req.headers["content-length"] || "N/A"),
       "providedLen=", provided.length,
       "match=", provided === pass
     );
 
     if (!pass) return res.status(500).json({ error: "Server missing SANTA_PASSWORD" });
-    if (!provided || provided !== pass) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!provided || provided !== pass) return res.status(401).json({ error: "Unauthorized" });
 
     const { lat, lng, accuracy, ts } = body;
     if (typeof lat !== "number" || typeof lng !== "number") {
@@ -77,13 +85,14 @@ app.post("/api/update-location", (req, res) => {
       ts: (typeof ts === "number" ? ts : now),
       serverTs: now
     };
-    broadcastLocation();
+    io.emit("location", lastLocation);
     return res.json({ ok: true });
   } catch (e) {
     console.error("update-location error:", e);
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 // Socket.io push to viewers
 io.on("connection", (socket) => {
