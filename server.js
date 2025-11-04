@@ -44,33 +44,35 @@ app.use(express.urlencoded({ extended: true }));
 // Protected: phone posts GPS updates using password token
 app.post("/api/update-location", (req, res) => {
   try {
-    // Make sure this middleware is ABOVE this route:
+    // Make sure these are ABOVE this route in your file:
     // app.use(express.json());
     // app.use(express.urlencoded({ extended: true }));
 
     const body = req.body || {};
-    // Accept token from multiple places (body, header, query)
     const tokenIncoming =
       (typeof body.token === "string" ? body.token :
       typeof body.password === "string" ? body.password :
       typeof body.pass === "string" ? body.pass :
       req.get("x-santa-token") || req.query.token || "");
 
+    // Normalize/trim both sides (strip wrapping single/double quotes from env)
     const provided = String(tokenIncoming || "").trim();
+    const rawPass = process.env.SANTA_PASSWORD ?? "MIFD5150";
+    const pass = String(rawPass).trim().replace(/^['"]|['"]$/g, "");
 
-    // Use hardcoded fallback or env, whichever you prefer
-    const pass = String(process.env.SANTA_PASSWORD || "MIFD5150").trim();
-
-    // DEBUG: see exactly what Express received
+    // TEMP DEBUG: check lengths (no secret printed)
     console.log("UPDATE /api/update-location",
       "ct=", req.headers["content-type"],
       "len=", (req.headers["content-length"] || "N/A"),
       "providedLen=", provided.length,
+      "expectedLen=", pass.length,
       "match=", provided === pass
     );
 
     if (!pass) return res.status(500).json({ error: "Server missing SANTA_PASSWORD" });
-    if (!provided || provided !== pass) return res.status(401).json({ error: "Unauthorized" });
+    if (!provided || provided !== pass) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
 
     const { lat, lng, accuracy, ts } = body;
     if (typeof lat !== "number" || typeof lng !== "number") {
@@ -79,8 +81,7 @@ app.post("/api/update-location", (req, res) => {
 
     const now = Date.now();
     lastLocation = {
-      lat,
-      lng,
+      lat, lng,
       accuracy: (typeof accuracy === "number" ? accuracy : null),
       ts: (typeof ts === "number" ? ts : now),
       serverTs: now
@@ -92,6 +93,7 @@ app.post("/api/update-location", (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 
 
 // Socket.io push to viewers
