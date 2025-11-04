@@ -1,53 +1,106 @@
-// -------------------- SNAPPED ROUTE API (roads only, robust) --------------------
-import fs from "fs";
+// server.js
+import express from "express";
+import http from "http";
+import { Server as SocketIOServer } from "socket.io";
 import path from "path";
-const PUBLIC_DIR = path.join(__dirname, "public");
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+import compression from "compression";
+import cors from "cors";
+import fs from "fs";
 
-const WAYPOINTS_PATH = path.join(PUBLIC_DIR, "waypoints.json");
-let WAYPOINTS_RAW = [];
-try {
-  WAYPOINTS_RAW = JSON.parse(fs.readFileSync(WAYPOINTS_PATH, "utf8"));
-} catch (e) {
-  console.warn("No or invalid waypoints.json:", e.message);
-  WAYPOINTS_RAW = [];
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const server = http.createServer(app);
+const io = new SocketIOServer(server, { cors: { origin: "*" } });
+
+app.use(compression());
+app.use(cors());
+app.use(express.json());
+
+const PUBLIC_DIR = path.join(__dirname, "public");
+app.use(express.static(PUBLIC_DIR));
+
+// -------------------- LIVE LOCATION STORAGE --------------------
+let lastLocation = null; // { lat, lng, accuracy, ts, serverTs }
+
+function broadcastLocation() {
+  if (lastLocation) io.emit("location", lastLocation);
 }
 
-function isNum(n) { return typeof n === "number" && Number.isFinite(n); }
+// Health
+app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-// Clean & validate waypoints
-function sanitizeWaypoints(list) {
-  const errs = [];
-  const out = [];
-  let lastKey = null;
+// Public: get current location (polling fallback)
+app.get("/api/location", (req, res) => res.json(lastLocation || {}));
 
-  (list || []).forEach((w, idx) => {
-    const name = (w && w.name) ? String(w.name) : `wp_${idx}`;
-    const lat = w && (isNum(w.lat) ? w.lat : Number(w.lat));
-    const lng = w && (isNum(w.lng) ? w.lng : Number(w.lng));
-
-    if (!isNum(lat) || !isNum(lng)) {
-      errs.push({ idx, name, reason: "Non-numeric lat/lng" });
-      return;
+// Protected: phone posts GPS updates using password token
+app.post("/api/update-location", (req, res) => {
+  try {
+    const { lat, lng, accuracy, ts, token } = req.body || {};
+    const pass = process.env.SANTA_PASSWORD;
+    if (!pass) return res.status(500).json({ error: "Server missing SANTA_PASSWORD" });
+    if (!token || token !== pass) return res.status(401).json({ error: "Unauthorized" });
+    if (typeof lat !== "number" || typeof lng !== "number") {
+      return res.status(400).json({ error: "lat and lng required" });
     }
-    // Basic sanity for LI area (rough box; adjust if needed)
-    if (lat < 40 || lat > 41.5 || lng > -71 || lng < -74) {
-      errs.push({ idx, name, reason: "Lat/lng out of expected bounds" });
-      return;
-    }
-
-    const key = `${lat.toFixed(6)},${lng.toFixed(6)}`;
-    // Drop exact duplicates in a row (can confuse OSRM)
-    if (key === lastKey) return;
-    lastKey = key;
-
-    out.push({ name, lat, lng });
-  });
-
-  // Need at least two points
-  if (out.length < 2) {
-    errs.push({ idx: -1, name: "global", reason: "Fewer than 2 valid waypoints after sanitation" });
+    const now = Date.now();
+    lastLocation = {
+      lat, lng,
+      accuracy: (typeof accuracy === "number" ? accuracy : null),
+      ts: (typeof ts === "number" ? ts : now),
+      serverTs: now
+    };
+    broadcastLocation();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Server error" });
   }
-  return { waypoints: out, errors: errs };
+});
+
+// Socket.io push to viewers
+io.on("connection", (socket) => {
+  if (lastLocation) socket.emit("location", lastLocation);
+});
+
+// -------------------- RESET PARADE (Admin-only) --------------------
+app.post("/api/reset", (req, res) => {
+  try {
+    const token = (req.body && req.body.token) || req.query.token;
+    const pass = process.env.SANTA_PASSWORD;
+    if (!pass) return res.status(500).json({ error: "Server missing SANTA_PASSWORD" });
+    if (!token || token !== pass) return res.status(401).json({ error: "Unauthorized" });
+
+    // Clear current location and notify all viewers to reset progress
+    lastLocation = null;
+    io.emit("reset", { ts: Date.now() });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("reset error:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// -------------------- SNAPPED ROUTE API (roads only) --------------------
+// Load waypoints.json from /public (labels + anchor points)
+const WAYPOINTS_PATH = path.join(PUBLIC_DIR, "waypoints.json");
+let WAYPOINTS = [];
+try {
+  WAYPOINTS = JSON.parse(fs.readFileSync(WAYPOINTS_PATH, "utf8"));
+} catch (e) {
+  console.warn("No waypoints.json or invalid JSON. Proceeding with empty waypoints.");
+  WAYPOINTS = [];
+}
+
+function getWaypointLngLats() {
+  return WAYPOINTS
+    .filter(w => typeof w.lng === "number" && typeof w.lat === "number")
+    .map(w => ({ lng: w.lng, lat: w.lat }));
 }
 
 function chunk(arr, size) {
@@ -56,10 +109,23 @@ function chunk(arr, size) {
   return out;
 }
 
+// Call public OSRM for each chunk to snap to roads
+async function osrmRouteChunk(coords) {
+  const coordStr = coords.map(c => `${c.lng},${c.lat}`).join(";");
+  const urlStr = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=full&geometries=geojson&steps=false`;
+  const res = await fetch(urlStr);
+  if (!res.ok) throw new Error("OSRM request failed");
+  const data = await res.json();
+  if (!data.routes || !data.routes[0] || !data.routes[0].geometry) {
+    throw new Error("OSRM returned no geometry");
+  }
+  return data.routes[0].geometry; // GeoJSON LineString
+}
+
 function concatLineStrings(lineStrings) {
   const allCoords = [];
   for (const ls of lineStrings) {
-    if (!ls || ls.type !== "LineString" || !Array.isArray(ls.coordinates)) continue;
+    if (ls.type !== "LineString" || !Array.isArray(ls.coordinates)) continue;
     if (allCoords.length && ls.coordinates.length) {
       const first = ls.coordinates[0];
       const last  = allCoords[allCoords.length - 1];
@@ -73,107 +139,47 @@ function concatLineStrings(lineStrings) {
   return { type: "LineString", coordinates: allCoords };
 }
 
-// Fetch with retries/backoff (handles 429/5xx and transient network errors)
-async function fetchWithRetry(url, { tries = 4, baseDelay = 400 } = {}) {
-  let lastErr;
-  for (let i = 0; i < tries; i++) {
-    try {
-      const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 12000); // 12s timeout per request
-      const res = await fetch(url, { signal: ctrl.signal });
-      clearTimeout(to);
-      if (res.ok) return await res.json();
-      lastErr = new Error(`HTTP ${res.status}`);
-    } catch (e) {
-      lastErr = e;
+let SNAPPED_ROUTE = null;
+
+app.get("/api/route", async (req, res) => {
+  try {
+    if (SNAPPED_ROUTE) return res.json(SNAPPED_ROUTE);
+
+    const pts = getWaypointLngLats();
+    if (pts.length < 2) return res.status(400).json({ error: "Not enough waypoints." });
+
+    // Chunk to be kind to public OSRM (and to stay under waypoint limits)
+    const chunks = chunk(pts, 25);
+    for (let i = 1; i < chunks.length; i++) {
+      const prevLast = chunks[i - 1][chunks[i - 1].length - 1];
+      chunks[i] = [prevLast, ...chunks[i]];
     }
-    await new Promise(r => setTimeout(r, baseDelay * Math.pow(2, i))); // backoff
-  }
-  throw lastErr;
-}
 
-async function osrmRouteChunk(coords) {
-  // OSRM expects lng,lat; limit per request to ~100, but we use ~20 for safety
-  const coordStr = coords.map(c => `${c.lng},${c.lat}`).join(";");
-  const urlStr = `https://router.project-osrm.org/route/v1/driving/${coordStr}?overview=full&geometries=geojson&steps=false`;
-  const data = await fetchWithRetry(urlStr, { tries: 4, baseDelay: 500 });
-  if (!data.routes || !data.routes[0] || !data.routes[0].geometry) {
-    throw new Error("OSRM returned no geometry");
-  }
-  return data.routes[0].geometry; // GeoJSON LineString
-}
-
-let ROUTE_CACHE = { geojson: null, builtAt: 0, diag: null };
-
-// Helper to rebuild route with strong diagnostics
-async function buildSnappedRoute() {
-  const startTs = Date.now();
-  const diag = { startTs, errors: [], warnings: [], chunksTried: 0, chunksOk: 0 };
-
-  const { waypoints, errors } = sanitizeWaypoints(WAYPOINTS_RAW);
-  if (errors.length) diag.errors.push({ type: "sanity", details: errors });
-  if (waypoints.length < 2) throw new Error("Not enough valid waypoints after sanitation");
-
-  // Chunk the route (20 pts per chunk; overlap 1 point between chunks)
-  const pts = waypoints.map(w => ({ lng: w.lng, lat: w.lat }));
-  const chunks = chunk(pts, 20).map((c, i, arr) => (i > 0 ? [arr[i-1][arr[i-1].length - 1], ...c] : c));
-  const lineStrings = [];
-
-  diag.chunksTried = chunks.length;
-
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    if (c.length < 2) continue;
-    try {
+    const lineStrings = [];
+    for (const c of chunks) {
+      if (c.length < 2) continue;
       const ls = await osrmRouteChunk(c);
       lineStrings.push(ls);
-      diag.chunksOk++;
-    } catch (e) {
-      diag.errors.push({ type: "osrm", chunkIndex: i, message: e.message });
-      // Skip this chunk but continue to try the rest (graceful degradation)
     }
-  }
+    const merged = concatLineStrings(lineStrings);
 
-  if (lineStrings.length === 0) {
-    throw new Error("All OSRM chunk requests failed");
-  }
-
-  const merged = concatLineStrings(lineStrings);
-  const fc = {
-    type: "FeatureCollection",
-    features: [{
-      type: "Feature",
-      properties: { name: "MIFD Santa Parade (Snapped to Roads)", source: "OSRM" },
-      geometry: merged
-    }]
-  };
-
-  ROUTE_CACHE = { geojson: fc, builtAt: Date.now(), diag: { ...diag, tookMs: Date.now() - startTs } };
-  return fc;
-}
-
-// Non-caching debug endpoint to see what's going on
-app.get("/api/route-debug", async (req, res) => {
-  res.set("Cache-Control", "no-store");
-  try {
-    // Force rebuild (ignore cache)
-    await buildSnappedRoute();
-    res.json({ ok: true, diag: ROUTE_CACHE.diag, sample: ROUTE_CACHE.geojson?.features?.[0]?.geometry?.coordinates?.slice(0,5) });
+    SNAPPED_ROUTE = {
+      type: "FeatureCollection",
+      features: [{
+        type: "Feature",
+        properties: { name: "MIFD Santa Parade (Snapped to Roads)", source: "OSRM" },
+        geometry: merged
+      }]
+    };
+    res.json(SNAPPED_ROUTE);
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message, diag: ROUTE_CACHE.diag });
+    console.error("Snapped route build failed:", e.message);
+    res.status(500).json({ error: "Failed to build snapped route." });
   }
 });
 
-// Cached route endpoint for the viewer (fast path)
-app.get("/api/route", async (req, res) => {
-  res.set("Cache-Control", "no-store");
-  try {
-    if (!ROUTE_CACHE.geojson) {
-      await buildSnappedRoute();
-    }
-    res.json(ROUTE_CACHE.geojson);
-  } catch (e) {
-    console.error("Snapped route build failed:", e.message);
-    res.status(500).json({ error: "Failed to build snapped route.", reason: e.message });
-  }
+// -------------------- START SERVER --------------------
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Santa Tracker running on http://localhost:${PORT}`);
 });
