@@ -68,24 +68,6 @@ io.on("connection", (socket) => {
   if (lastLocation) socket.emit("location", lastLocation);
 });
 
-// -------------------- RESET PARADE (Admin-only) --------------------
-app.post("/api/reset", (req, res) => {
-  try {
-    const token = (req.body && req.body.token) || req.query.token;
-    const pass = process.env.SANTA_PASSWORD;
-    if (!pass) return res.status(500).json({ error: "Server missing SANTA_PASSWORD" });
-    if (!token || token !== pass) return res.status(401).json({ error: "Unauthorized" });
-
-    // Clear current location and notify all viewers to reset progress
-    lastLocation = null;
-    io.emit("reset", { ts: Date.now() });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error("reset error:", e);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
 // -------------------- SNAPPED ROUTE API (roads only) --------------------
 // Load waypoints.json from /public (labels + anchor points)
 const WAYPOINTS_PATH = path.join(PUBLIC_DIR, "waypoints.json");
