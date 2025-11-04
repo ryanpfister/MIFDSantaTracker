@@ -40,7 +40,7 @@ const waypointsDotsLayer = L.layerGroup([], { pane: 'waypointsPane' }).addTo(map
 
 // ----- Styling & helpers -----
 const SANTA_ICON = L.icon({
-  iconUrl: "https://cdn-icons-png.flaticon.com/512/616/616408.png", // Santa hat icon
+  iconUrl: "https://cdn-icons-png.flaticon.com/512/6235/6235085.png", // Santa hat icon
   iconSize: [96, 96],   // large icon
   iconAnchor: [48, 96], // base of the hat sits on exact GPS point
   popupAnchor: [0, -80]
