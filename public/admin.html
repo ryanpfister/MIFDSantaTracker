@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Santa Tracker – Device Uploader</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 24px; background:#f7f7f8; }
+    .card { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
+    h1 { margin: 0 0 8px; }
+    label { display:block; margin-top: 12px; font-weight: 600;}
+    input[type="password"], input[type="text"] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #ddd; }
+    button { margin-top: 16px; padding: 10px 14px; border: none; border-radius: 10px; font-weight: 700; cursor:pointer; }
+    .primary { background: #e11d48; color: #fff; }
+    .muted { color: #666; font-size: 14px; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .row > * { flex: 1; min-width: 140px; }
+    .ghost { background:#6b7280; color:#fff; }
+    .warn { background:#f59e0b; color:#111; }
+    .status { margin-top: 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Santa Tracker – Device Uploader</h1>
+    <p class="muted">Enter the password and tap Arm Tracking. Keep this page open while driving the route.</p>
+
+    <label>Password</label>
+    <input id="password" type="password" placeholder="Enter the secret password" autocomplete="current-password" />
+
+    <div class="row">
+      <button id="armBtn" class="primary">Arm Tracking</button>
+      <button id="stopBtn" class="ghost">Stop</button>
+      <button id="resetBtn" class="warn" title="Resets progress for ALL viewers">Reset Parade</button>
+    </div>
+
+    <div class="status" id="status">Status: idle</div>
+    <p class="muted">Note: GPS requires HTTPS in production (or localhost). On iPhone, add to Home Screen for full-screen.</p>
+  </div>
+
+  <script>
+    const statusBox = document.getElementById('status');
+    const armBtn = document.getElementById('armBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const passInput = document.getElementById('password');
+
+    let watchId = null;
+    let timerId = null;
+
+    function setStatus(text) { statusBox.textContent = 'Status: ' + text; }
+
+    async function sendLocation(position) {
+      try {
+        const payload = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+          ts: Date.now(),
+          token: passInput.value
+        };
+        const res = await fetch('/api/update-location', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const ok = res.ok;
+        const data = ok ? await res.json() : await res.json().catch(()=>({}));
+        if (!ok) setStatus('Server rejected update: ' + (data.error || res.status));
+        else setStatus('Last update sent at ' + new Date().toLocaleTimeString());
+      } catch (e) {
+        setStatus('Network error sending update');
+      }
+    }
+
+    function start() {
+      if (!passInput.value) {
+        alert('Enter password first.');
+        passInput.focus();
+        return;
+      }
+      if (!navigator.geolocation) {
+        setStatus('Geolocation not supported');
+        return;
+      }
+      setStatus('Tracking…');
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => { sendLocation(pos); },
+        (err) => { setStatus('GPS error: ' + err.message); },
+        { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
+      );
+      timerId = setInterval(() => {
+        navigator.geolocation.getCurrentPosition((pos) => sendLocation(pos));
+      }, 15000);
+    }
+
+    function stop() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+      if (timerId) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+      setStatus('idle');
+    }
+
+    async function resetParade() {
+      if (!passInput.value) {
+        alert('Enter password first.');
+        passInput.focus();
+        return;
+      }
+      if (!confirm('Reset parade for ALL viewers? This will clear Santa and set the route back to start.')) return;
+      try {
+        const res = await fetch('/api/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: passInput.value })
+        });
+        const ok = res.ok;
+        const data = ok ? await res.json() : await res.json().catch(()=>({}));
+        if (!ok) setStatus('Reset failed: ' + (data.error || res.status));
+        else setStatus('Parade reset sent ✔');
+      } catch (e) {
+        setStatus('Network error during reset');
+      }
+    }
+
+    armBtn.addEventListener('click', start);
+    stopBtn.addEventListener('click', stop);
+    resetBtn.addEventListener('click', resetParade);
+  </script>
+</body>
+</html>
