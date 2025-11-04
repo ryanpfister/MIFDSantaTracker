@@ -41,7 +41,7 @@ app.get("/api/location", (req, res) => res.json(lastLocation || {}));
 app.post("/api/update-location", (req, res) => {
   try {
     const { lat, lng, accuracy, ts, token } = req.body || {};
-    const pass = process.env.SANTA_PASSWORD;
+    const pass = "MIFD5150";
     if (!pass) return res.status(500).json({ error: "Server missing SANTA_PASSWORD" });
     if (!token || token !== pass) return res.status(401).json({ error: "Unauthorized" });
     if (typeof lat !== "number" || typeof lng !== "number") {
